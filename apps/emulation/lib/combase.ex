@@ -4,7 +4,7 @@ end
 
 defmodule ComBase do
   @moduledoc """
-  ComBase emulates a distribtued application connected
+  ComBase emulates a distributed application connected
   over a potentially asynchronous network.
   """
   defstruct(
