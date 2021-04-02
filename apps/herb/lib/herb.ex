@@ -155,6 +155,75 @@ defmodule Herb do
   # in the DKG phase (perhaps not in the DRB phase later though). In other words,
   # all nodes are in QUAL, so the number of nodes in QUAL is n.
   defp dkg(state, counter) do
-    nil
+    receive do
+      # Receive start order for DKG
+      {sender, :dkg} ->
+        IO.puts "#{inspect(whoami())} Received :dkg"
+        state = %{state | client: sender}
+        state = get_poly_then_send(state)
+        counter = counter + 1
+        cond do
+          # This can happen if the network is highly unstable such that the :dkg message
+          # from the client reaches a node last (compared to subshare messages)
+          counter == state.n ->
+            subshares = Map.values(state.view_subshare)
+            share = Enum.sum(subshares)
+            state = %{state | share: share}
+            IO.puts "#{inspect(whoami())} Exits DKG due to #{inspect(sender)}, share is #{inspect(state.share)}"
+            ## drb_next_round(state)
+          # Normal cases
+          true ->
+            dkg(state, counter)
+        end
+
+      # Listen mode for subshares
+      {sender, {subshare, comm}} ->
+        # IO.puts "#{inspect(whoami())} Received subshare from #{inspect(sender)}"
+        id_me = Map.get(state.view_id, whoami())
+        case verify_subshare(subshare, comm, state.g, state.p, id_me) do
+          # We should not end up here due to our QUAL assumption from the outset
+          false ->
+            raise "QUAL assumption violated"
+          # Normal cases
+          true ->
+            state = %{state | view_subshare: Map.put(state.view_subshare, sender, subshare)}
+            counter = counter + 1
+            cond do
+              # Need to wait for more subshares
+              counter < state.n ->
+                dkg(state, counter)
+              # Can make a share out of all subshares received
+              true ->
+                subshares = Map.values(state.view_subshare)
+                share = Enum.sum(subshares)
+                state = %{state | share: share}
+                IO.puts "#{inspect(whoami())} Exits DKG due to #{inspect(sender)}, share is #{inspect(state.share)}"
+                ## drb_next_round(state)
+            end
+        end
+    end
+  end
+
+  def get_nizk(g1, h1, g2, h2, p, q, share) do
+    w = :rand.uniform(q)
+    a1 = :maths.mod_exp(g1, w, p)
+    a2 = :maths.mod_exp(g2, w, p)
+    params = ["#{h1}", "#{h2}", "#{a1}", "#{a2}"]
+    c = :crypto.hash(:sha224, params) |> :binary.decode_unsigned |> :maths.mod(q)
+    r = :maths.mod(w - share * c, q)
+    {a1, a2, r}
+  end
+
+  def verify_nizk(subsign, nizk_msg, state) do
+    {nizk, comm_to_share, hash} = nizk_msg
+    {a1, a2, r} = nizk
+    {p, q} = {state.p, state.q}
+    lhs1 = a1
+    lhs2 = a2
+    params = ["#{comm_to_share}", "#{subsign}", "#{a1}", "#{a2}"]
+    c = :crypto.hash(:sha224, params) |> :binary.decode_unsigned |> :maths.mod(q)
+    rhs1 = :maths.mod_exp(state.g, r, p) * :maths.mod_exp(comm_to_share, c, p) |> :maths.mod(p)
+    rhs2 = :maths.mod_exp(hash, r, p) * :maths.mod_exp(subsign, c, p) |> :maths.mod(p)
+    lhs1 == rhs1 && lhs2 == rhs2
   end
 end
