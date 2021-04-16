@@ -16,6 +16,8 @@ defmodule Herb do
     n: nil,
     # Group generator of Z_q where q is prime
     g: nil,
+    # Group public key
+    h: nil,
     # Prime number (must be a safe prime: https://en.wikipedia.org/wiki/Safe_and_Sophie_Germain_primes)
     p: nil,
     # Prime number equal to (p - 1) / 2
@@ -24,12 +26,14 @@ defmodule Herb do
     view: nil,
     # Map of pid to id
     view_id: nil,
-    # Subshare from each node
-    view_subshare: nil,
-    # Subsignature from each node for all rounds
-    view_subsign: nil,
-    # Individual share used to make subsignatures for DRB
+    # Subshare and individual public key from each node
+    view_subshare_and_pk: nil,
+    # Individual share from received subshares
     share: nil,
+    # Subciphertext from each node for all rounds
+    view_subciphertext: nil,
+    # Subdecryption from each node for all rounds
+    view_subdecryption: nil,
     # Max number of rounds for DRB
     round_max: nil,
     # Current round for DRB
@@ -55,11 +59,13 @@ defmodule Herb do
       ) do
     q = trunc((p - 1) / 2)
     view_id = Enum.with_index(view, 1) |> Map.new()
-    view_subshare = Enum.map(view, fn a -> {a, nil} end) |> Map.new()
-    view_subsign = 1..round_max |> Enum.map(fn n ->
-                                     {n, Enum.map(view, fn a -> {a, nil} end) |> Map.new()}
-                                   end)
-                                |> Map.new()
+    view_subshare_and_pk = Enum.map(view, fn a -> {a, nil} end) |> Map.new()
+    view_subciphertext = 1..round_max
+    |> Enum.map(fn n -> {n, Enum.map(view, fn a -> {a, nil} end) |> Map.new()} end)
+    |> Map.new()
+    view_subdecryption = 1..round_max
+    |> Enum.map(fn n -> {n, Enum.map(view, fn a -> {a, nil} end) |> Map.new()} end)
+    |> Map.new()
     %Herb{
       t: t,
       n: n,
@@ -68,8 +74,9 @@ defmodule Herb do
       q: q,
       view: view,
       view_id: view_id,
-      view_subshare: view_subshare,
-      view_subsign: view_subsign,
+      view_subshare_and_pk: view_subshare_and_pk,
+      view_subciphertext: view_subciphertext,
+      view_subdecryption: view_subdecryption,
       round_max: round_max,
       round_current: 0,
       last_output: last_output,
@@ -84,6 +91,7 @@ defmodule Herb do
   end
 
   # Algorithm 4.86 from http://cacr.uwaterloo.ca/hac/about/chap4.pdf
+  # :maths belongs to ndpar library
   defp get_generator(p, x) do
     cond do
       # Find a generator of (Z_p)* first
@@ -94,6 +102,16 @@ defmodule Herb do
       true ->
         get_generator(p, x + 1)
     end
+  end
+
+  # We commit to coefficients by raising g (group generator) to the power of each coefficient
+  def get_comm(coeff, g, p) do
+    Enum.map(coeff, fn x -> :maths.mod_exp(g, x, p) end)
+  end
+
+  # Horner's method for polynomial evaluation (at id)
+  def get_subshare(coeff, id, q) do
+    :maths.mod(Enum.reduce(Enum.reverse(coeff), 0, fn x, acc -> x + acc * id end), q)
   end
 
   # We start n parallel instances of VSS (verifiable secret sharing)
@@ -107,27 +125,16 @@ defmodule Herb do
     |> Enum.filter(fn pid -> pid != whoami() end)
     |> Enum.map(fn pid ->
          id = Map.get(state.view_id, pid)
-         subshare = get_subshare(coeff, id)
+         subshare = get_subshare(coeff, id, state.q)
          msg = {subshare, comm}
          send(pid, msg)
        end)
 
     # Calculate my subshare and update state
     id_me = Map.get(state.view_id, whoami())
-    subshare_me = get_subshare(coeff, id_me)
-    state = %{state | view_subshare: Map.put(state.view_subshare, whoami(), subshare_me)}
+    subshare_me = get_subshare(coeff, id_me, state.q)
+    state = %{state | view_subshare_and_pk: Map.put(state.view_subshare_and_pk, whoami(), {subshare_me, List.first(comm)})}
     state
-  end
-
-  # We commit to coefficients by raising g (group generator) to the power of each coefficient
-  def get_comm(coeff, g, p) do
-    # :maths belongs to ndpar library
-    Enum.map(coeff, fn x -> :maths.mod_exp(g, x, p) end)
-  end
-
-  # Horner's method for polynomial evaluation (at id)
-  def get_subshare(coeff, id) do
-    Enum.reduce(Enum.reverse(coeff), 0, fn x, acc -> x + acc * id end)
   end
 
   # Verify a subshare as per VSS (verifiable secret sharing)
@@ -139,21 +146,11 @@ defmodule Herb do
     lhs == rhs
   end
 
-  # Above are utility functions before DKG
-  # Below is DKG
-
   # Distributed key generation
   def dkg(state) do
     dkg(state, 0)
   end
 
-  # Counter counts how many subshares one has received so far (need n)
-  # Note (QUAL assumption): In the literature, the usual assumption is that some nodes could be
-  # unresponsive/faulty/Byzantine in the DKG phase (pre-DRB phase), in which case
-  # nodes first need to agree on a group of qualified nodes (denoted by QUAL) during DKG.
-  # Here, we assume that all initialized nodes are honest and fully functional
-  # in the DKG phase (perhaps not in the DRB phase later though). In other words,
-  # all nodes are in QUAL, so the number of nodes in QUAL is n.
   defp dkg(state, counter) do
     receive do
       # Receive start order for DKG
@@ -166,11 +163,12 @@ defmodule Herb do
           # This can happen if the network is highly unstable such that the :dkg message
           # from the client reaches a node last (compared to subshare messages)
           counter == state.n ->
-            subshares = Map.values(state.view_subshare)
-            share = Enum.sum(subshares)
-            state = %{state | share: share}
-            IO.puts "#{inspect(whoami())} Exits DKG due to #{inspect(sender)}, share is #{inspect(state.share)}"
-            ## drb_next_round(state)
+            {p, q} = {state.p, state.q}
+            {share, h} = Map.values(state.view_subshare_and_pk)
+            |> Enum.reduce(fn x, acc -> {:maths.mod(elem(acc, 0) + elem(x, 0), q), :maths.mod(elem(acc, 1) * elem(x, 1), p)} end)
+            state = %{state | share: share, h: h}
+            IO.puts "#{inspect(whoami())} Exits DKG due to #{inspect(sender)}, share #{state.share} h #{state.h}"
+            herb_next_round(state)
           # Normal cases
           true ->
             dkg(state, counter)
@@ -181,12 +179,11 @@ defmodule Herb do
         # IO.puts "#{inspect(whoami())} Received subshare from #{inspect(sender)}"
         id_me = Map.get(state.view_id, whoami())
         case verify_subshare(subshare, comm, state.g, state.p, id_me) do
-          # We should not end up here due to our QUAL assumption from the outset
           false ->
-            raise "QUAL assumption violated"
+            raise "DKG verify shouldn't fail"
           # Normal cases
           true ->
-            state = %{state | view_subshare: Map.put(state.view_subshare, sender, subshare)}
+            state = %{state | view_subshare_and_pk: Map.put(state.view_subshare_and_pk, sender, {subshare, List.first(comm)})}
             counter = counter + 1
             cond do
               # Need to wait for more subshares
@@ -194,17 +191,23 @@ defmodule Herb do
                 dkg(state, counter)
               # Can make a share out of all subshares received
               true ->
-                subshares = Map.values(state.view_subshare)
-                share = Enum.sum(subshares)
-                state = %{state | share: share}
-                IO.puts "#{inspect(whoami())} Exits DKG due to #{inspect(sender)}, share is #{inspect(state.share)}"
-                ## drb_next_round(state)
+                {p, q} = {state.p, state.q}
+                {share, h} = Map.values(state.view_subshare_and_pk)
+                |> Enum.reduce(fn x, acc -> {:maths.mod(elem(acc, 0) + elem(x, 0), q), :maths.mod(elem(acc, 1) * elem(x, 1), p)} end)
+                state = %{state | share: share, h: h}
+                IO.puts "#{inspect(whoami())} Exits DKG due to #{inspect(sender)}, share #{state.share} h #{state.h}"
+                herb_next_round(state)
             end
         end
     end
   end
 
-  def get_nizk(g1, h1, g2, h2, p, q, share) do
+  ##########################################
+  # End of DKG phase
+  # Start of beacon phase
+  ##########################################
+
+  def get_dleq_nizk(g1, h1, g2, h2, p, q, share) do
     w = :rand.uniform(q)
     a1 = :maths.mod_exp(g1, w, p)
     a2 = :maths.mod_exp(g2, w, p)
@@ -214,7 +217,7 @@ defmodule Herb do
     {a1, a2, r}
   end
 
-  def verify_nizk(subsign, nizk_msg, state) do
+  def verify_dleq_nizk(subsign, nizk_msg, state) do
     {nizk, comm_to_share, hash} = nizk_msg
     {a1, a2, r} = nizk
     {p, q} = {state.p, state.q}
@@ -225,5 +228,82 @@ defmodule Herb do
     rhs1 = :maths.mod_exp(state.g, r, p) * :maths.mod_exp(comm_to_share, c, p) |> :maths.mod(p)
     rhs2 = :maths.mod_exp(hash, r, p) * :maths.mod_exp(subsign, c, p) |> :maths.mod(p)
     lhs1 == rhs1 && lhs2 == rhs2
+  end
+
+  def get_schnorr_nizk(g, g_to_r, p, q, r) do
+    nil
+  end
+
+  def verify_schnorr_nizk() do
+    nil
+  end
+
+  def get_lambda(lambda_set, i, q) do
+    # We work with modulo q (not p) when dealing with exponents
+    Enum.filter(lambda_set, fn x -> x != i end)
+    |> Enum.map(fn j ->
+         # Below `cond do` is b/c :maths.mod_inv() cannot deal with negative numbers
+         cond do
+           j / (j - i) < 0 ->
+             # Can't perform :maths.mod_inv() if q is not prime
+             :maths.mod(-j, q) * :maths.mod_inv(i - j, q)
+           j / (j - i) > 0 ->
+             :maths.mod(j, q) * :maths.mod_inv(j - i, q)
+           true ->
+             raise "Should not get any zero when calculating lambda"
+         end
+       end)
+    |> Enum.reduce(fn x, acc -> :maths.mod(x * acc, q) end)
+  end
+
+  def get_sign(subsigns, p, q) do
+    lambda_set = Enum.map(subsigns, fn x -> elem(x, 0) end)
+    Enum.map(subsigns, fn x ->
+      subsign = elem(x, 1)
+      lambda = get_lambda(lambda_set, elem(x, 0), q)
+      :maths.mod_exp(subsign, lambda, p)
+    end)
+    |> Enum.reduce(fn x, acc -> :maths.mod(x * acc, p) end)
+  end
+
+  def get_new_view_subciphertext(view, round, pid, subsign) do
+    res = Map.put(view[round], pid, subsign)
+    Map.put(view, round, res)
+  end
+
+  def herb_next_round(state) do
+    state = %{state | round_current: state.round_current + 1}
+    cond do
+      # Successful completion of DRB
+      state.round_current > state.round_max ->
+        IO.puts "#{inspect(whoami())} Successfully completed!"
+        nil
+      # Ongoing DRB
+      true ->
+        {p, q, g, h} = {state.p, state.q, state.g, state.h}
+        r_k = :rand.uniform(q)
+        m_k = :rand.uniform(p - 1)
+        nizk = get_schnorr_nizk(g, :maths.mod_exp(g, r_k, p), p, q, r_k)
+        msg = {:maths.mod_exp(g, r_k, p), :maths.mod(m_k * :maths.mod_exp(h, r_k, p), p), nizk}
+
+        # Broadcasting
+        state.view
+        |> Enum.filter(fn pid -> pid != whoami() end)
+        |> Enum.map(fn pid -> send(pid, msg) end)
+
+        # Update own state
+        new = get_new_view_subciphertext(state.view_subciphertext, state.round_current, whoami(), 0)
+        state = %{state | view_subciphertext: new}
+        counter = Map.values(state.view_subciphertext[state.round_current]) |> Enum.count(fn x -> x != nil end)
+        herb(state, counter)
+    end
+  end
+
+  def herb(state, counter) do
+    nil
+  end
+
+  def herb_round_finish(state) do
+    nil
   end
 end

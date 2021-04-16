@@ -21,3 +21,6 @@ erl_crash.dump
 
 # When emulation -> mix docs
 .build
+
+# Personal notes
+Notes.txt
