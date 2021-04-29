@@ -191,7 +191,7 @@ defmodule Emulation do
   Cancel a timer previously set using either `timer/1` or
   `timer/2`. `timer` is the reference returned by those
   calls. Returns the number of milliseconds left on the
-  timer or `false` if the timer had already expired. 
+  timer or `false` if the timer had already expired.
   """
   @spec cancel_timer(reference()) :: number() | false
   def cancel_timer(timer) do
