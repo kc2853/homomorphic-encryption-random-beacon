@@ -1,5 +1,6 @@
 defmodule HerbTest do
   use ExUnit.Case
+  @moduletag timeout: :infinity
   doctest Herb
   import Emulation, only: [spawn: 2, send: 2, whoami: 0]
 
@@ -46,7 +47,7 @@ defmodule HerbTest do
     receive do
       {:DOWN, ^handle, _, _, _} -> true
     after
-      30_000 -> assert false
+      100_000 -> assert false
     end
   after
     Emulation.terminate()
@@ -110,7 +111,103 @@ defmodule HerbTest do
     receive do
       {:DOWN, ^handle, _, _, _} -> true
     after
-      30_000 -> assert false
+      100_000 -> assert false
+    end
+  after
+    Emulation.terminate()
+  end
+
+  test "HERB operates as intended when given nontrivial message delay" do
+    Emulation.init()
+    Emulation.append_fuzzers([Fuzzers.delay(500)])
+
+    t = 6
+    n = 10
+    # Sample list of safe primes: http://oeis.org/A005385/b005385.txt
+    p = 1019
+    view = [:p1, :p2, :p3, :p4, :p5, :p6, :p7, :p8, :p9, :p10]
+    round_max = 10
+    base_config =
+      Herb.new_configuration(t, n, Herb.get_generator(p), p, view, round_max)
+    replier_config =
+      %{base_config | replier: true}
+
+    spawn(:p1, fn -> Herb.dkg(replier_config) end)
+    spawn(:p2, fn -> Herb.dkg(base_config) end)
+    spawn(:p3, fn -> Herb.dkg(base_config) end)
+    spawn(:p4, fn -> Herb.dkg(base_config) end)
+    spawn(:p5, fn -> Herb.dkg(base_config) end)
+    spawn(:p6, fn -> Herb.dkg(base_config) end)
+    spawn(:p7, fn -> Herb.dkg(base_config) end)
+    spawn(:p8, fn -> Herb.dkg(base_config) end)
+    spawn(:p9, fn -> Herb.dkg(base_config) end)
+    spawn(:p10, fn -> Herb.dkg(base_config) end)
+
+    client =
+      spawn(:client, fn ->
+        start = :os.system_time(:millisecond)
+        Enum.map(view, fn pid -> send(pid, :dkg) end)
+        herb = client_listen_loop([], round_max)
+        assert Enum.count(herb) == round_max
+        finish = :os.system_time(:millisecond)
+        IO.puts "Total time taken: #{finish - start} ms"
+      end)
+
+    handle = Process.monitor(client)
+    # Timeout.
+    receive do
+      {:DOWN, ^handle, _, _, _} -> true
+    after
+      100_000 -> assert false
+    end
+  after
+    Emulation.terminate()
+  end
+
+  test "HERB when given nontrivial message delay and multiple Byzantine nodes" do
+    Emulation.init()
+    Emulation.append_fuzzers([Fuzzers.delay(500)])
+
+    t = 6
+    n = 10
+    # Sample list of safe primes: http://oeis.org/A005385/b005385.txt
+    p = 1019
+    view = [:p1, :p2, :p3, :p4, :p5, :p6, :p7, :p8, :p9, :p10]
+    round_max = 10
+    base_config =
+      Herb.new_configuration(t, n, Herb.get_generator(p), p, view, round_max)
+    replier_config =
+      %{base_config | replier: true}
+    byzantine_config =
+      %{base_config | byzantine: true}
+
+    spawn(:p1, fn -> Herb.dkg(replier_config) end)
+    spawn(:p2, fn -> Herb.dkg(byzantine_config) end)
+    spawn(:p3, fn -> Herb.dkg(byzantine_config) end)
+    spawn(:p4, fn -> Herb.dkg(byzantine_config) end)
+    spawn(:p5, fn -> Herb.dkg(byzantine_config) end)
+    spawn(:p6, fn -> Herb.dkg(base_config) end)
+    spawn(:p7, fn -> Herb.dkg(base_config) end)
+    spawn(:p8, fn -> Herb.dkg(base_config) end)
+    spawn(:p9, fn -> Herb.dkg(base_config) end)
+    spawn(:p10, fn -> Herb.dkg(base_config) end)
+
+    client =
+      spawn(:client, fn ->
+        start = :os.system_time(:millisecond)
+        Enum.map(view, fn pid -> send(pid, :dkg) end)
+        herb = client_listen_loop([], round_max)
+        assert Enum.count(herb) == round_max
+        finish = :os.system_time(:millisecond)
+        IO.puts "Total time taken: #{finish - start} ms"
+      end)
+
+    handle = Process.monitor(client)
+    # Timeout.
+    receive do
+      {:DOWN, ^handle, _, _, _} -> true
+    after
+      100_000 -> assert false
     end
   after
     Emulation.terminate()
