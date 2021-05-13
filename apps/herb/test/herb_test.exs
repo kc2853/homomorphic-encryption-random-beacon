@@ -7,6 +7,7 @@ defmodule HerbTest do
   import Kernel,
     except: [spawn: 3, spawn: 1, spawn_link: 1, spawn_link: 3, send: 2]
 
+  @tag disabled: true
   test "Nothing crashes during DKG setup" do
     Emulation.init()
     Emulation.append_fuzzers([Fuzzers.delay(2)])
@@ -79,7 +80,7 @@ defmodule HerbTest do
     # Sample list of safe primes: http://oeis.org/A005385/b005385.txt
     p = 100043
     view = [:p1, :p2, :p3, :p4, :p5, :p6, :p7, :p8, :p9, :p10]
-    round_max = 100
+    round_max = 10
     base_config =
       Herb.new_configuration(t, n, Herb.get_generator(p), p, view, round_max)
     replier_config =
@@ -124,7 +125,7 @@ defmodule HerbTest do
     t = 6
     n = 10
     # Sample list of safe primes: http://oeis.org/A005385/b005385.txt
-    p = 1019
+    p = 100043
     view = [:p1, :p2, :p3, :p4, :p5, :p6, :p7, :p8, :p9, :p10]
     round_max = 10
     base_config =
@@ -150,7 +151,7 @@ defmodule HerbTest do
         herb = client_listen_loop([], round_max)
         assert Enum.count(herb) == round_max
         finish = :os.system_time(:millisecond)
-        IO.puts "Total time taken: #{finish - start} ms"
+        IO.puts "Total time taken (non-byz): #{finish - start} ms"
       end)
 
     handle = Process.monitor(client)
@@ -171,7 +172,7 @@ defmodule HerbTest do
     t = 6
     n = 10
     # Sample list of safe primes: http://oeis.org/A005385/b005385.txt
-    p = 1019
+    p = 100043
     view = [:p1, :p2, :p3, :p4, :p5, :p6, :p7, :p8, :p9, :p10]
     round_max = 10
     base_config =
@@ -199,7 +200,7 @@ defmodule HerbTest do
         herb = client_listen_loop([], round_max)
         assert Enum.count(herb) == round_max
         finish = :os.system_time(:millisecond)
-        IO.puts "Total time taken: #{finish - start} ms"
+        IO.puts "Total time taken (byz): #{finish - start} ms"
       end)
 
     handle = Process.monitor(client)
