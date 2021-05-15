@@ -7,8 +7,6 @@ defmodule Herb do
   require Fuzzers
   require Logger
 
-  # This structure contains all the process state
-  # required by the HERB protocol.
   defstruct(
     # Threshold
     t: nil,
@@ -16,7 +14,7 @@ defmodule Herb do
     n: nil,
     # Group generator of Z_q where q is prime
     g: nil,
-    # Group public key
+    # Group public key (g to the power of group secret key)
     h: nil,
     # Prime number (must be a safe prime: https://en.wikipedia.org/wiki/Safe_and_Sophie_Germain_primes)
     p: nil,
@@ -81,7 +79,7 @@ defmodule Herb do
     }
   end
 
-  # Generator (primitive root) of Z_q where q is a prime number equal to (p - 1) / 2
+  # Generator (primitive root) of Z_q not (Z_p)*
   def get_generator(p) do
     get_generator(p, 2)
   end
@@ -90,8 +88,7 @@ defmodule Herb do
   # :maths belongs to ndpar library
   defp get_generator(p, x) do
     cond do
-      # Find a generator of (Z_p)* first
-      # then square it to get a generator of Z_q
+      # Find a generator of (Z_p)* first -> square it to get a generator of Z_q
       :maths.mod_exp(x, 2, p) != 1 && :maths.mod_exp(x, trunc((p - 1) / 2), p) != 1 ->
         :maths.mod_exp(x, 2, p)
       true ->
@@ -99,7 +96,7 @@ defmodule Herb do
     end
   end
 
-  # We commit to coefficients by raising g (group generator) to the power of each coefficient
+  # We commit to coefficients by raising g to the power of each coefficient
   def get_comm(coeff, g, p) do
     Enum.map(coeff, fn x -> :maths.mod_exp(g, x, p) end)
   end
@@ -114,8 +111,7 @@ defmodule Herb do
   def get_poly_then_send(state) do
     coeff = Enum.map(1..state.t, fn _ -> :rand.uniform(state.q) end)
     comm = get_comm(coeff, state.g, state.p)
-
-    # Correctly send corresponding subshares to each node
+    # Broadcast subshares
     state.view
     |> Enum.filter(fn pid -> pid != whoami() end)
     |> Enum.map(fn pid ->
@@ -124,7 +120,6 @@ defmodule Herb do
          msg = {subshare, comm}
          send(pid, msg)
        end)
-
     # Calculate my subshare and update state
     id_me = Map.get(state.view_id, whoami())
     subshare_me = get_subshare(coeff, id_me, state.q)
@@ -157,7 +152,7 @@ defmodule Herb do
         counter = counter + 1
         cond do
           # This can happen if the network is highly unstable such that the :dkg message
-          # from the client reaches a node last (compared to subshare messages)
+          # from the client reaches a node last (compared to subshare messages from others)
           counter == state.n ->
             {p, q} = {state.p, state.q}
             {share, h} = Map.values(state.view_subshare_and_pk)
@@ -203,6 +198,27 @@ defmodule Herb do
   # Start of beacon phase
   ##########################################
 
+  # NIZK for correct encryption
+  def get_schnorr_nizk(g, g_to_r, p, q, r) do
+    w = :rand.uniform(q)
+    u = :maths.mod_exp(g, w, p)
+    params = ["#{g}", "#{g_to_r}", "#{u}"]
+    c = :crypto.hash(:sha224, params) |> :binary.decode_unsigned |> :maths.mod(q)
+    z = :maths.mod(w + c * r, q)
+    {u, c, z}
+  end
+
+  def verify_schnorr_nizk(g, g_to_r, p, q, nizk) do
+    {u, c, z} = nizk
+    lhs1 = c
+    lhs2 = :maths.mod_exp(g, z, p)
+    params = ["#{g}", "#{g_to_r}", "#{u}"]
+    rhs1 = :crypto.hash(:sha224, params) |> :binary.decode_unsigned |> :maths.mod(q)
+    rhs2 = :maths.mod(u * :maths.mod_exp(g_to_r, c, p), p)
+    lhs1 == rhs1 && lhs2 == rhs2
+  end
+
+  # NIZK for correct subdecryption (Chaum-Pedersen)
   def get_dleq_nizk(g1, h1, g2, h2, p, q, share) do
     w = :rand.uniform(q)
     a1 = :maths.mod_exp(g1, w, p)
@@ -224,33 +240,13 @@ defmodule Herb do
     lhs1 == rhs1 && lhs2 == rhs2
   end
 
-  def get_schnorr_nizk(g, g_to_r, p, q, r) do
-    w = :rand.uniform(q)
-    u = :maths.mod_exp(g, w, p)
-    params = ["#{g}", "#{g_to_r}", "#{u}"]
-    c = :crypto.hash(:sha224, params) |> :binary.decode_unsigned |> :maths.mod(q)
-    z = :maths.mod(w + c * r, q)
-    {u, c, z}
-  end
-
-  def verify_schnorr_nizk(g, g_to_r, p, q, nizk) do
-    {u, c, z} = nizk
-    lhs1 = c
-    lhs2 = :maths.mod_exp(g, z, p)
-    params = ["#{g}", "#{g_to_r}", "#{u}"]
-    rhs1 = :crypto.hash(:sha224, params) |> :binary.decode_unsigned |> :maths.mod(q)
-    rhs2 = :maths.mod(u * :maths.mod_exp(g_to_r, c, p), p)
-    lhs1 == rhs1 && lhs2 == rhs2
-  end
-
+  # Lagrange interpolation constant
   def get_lambda(lambda_set, i, q) do
-    # We work with modulo q (not p) when dealing with exponents
     Enum.filter(lambda_set, fn x -> x != i end)
     |> Enum.map(fn j ->
          # Below `cond do` is b/c :maths.mod_inv() cannot deal with negative numbers
          cond do
            j / (j - i) < 0 ->
-             # Can't perform :maths.mod_inv() if q is not prime
              :maths.mod(-j, q) * :maths.mod_inv(i - j, q)
            j / (j - i) > 0 ->
              :maths.mod(j, q) * :maths.mod_inv(j - i, q)
@@ -261,6 +257,7 @@ defmodule Herb do
     |> Enum.reduce(fn x, acc -> :maths.mod(x * acc, q) end)
   end
 
+  # Lagrange interpolate subdecryptions -> decryption
   def get_decryption(subdecryptions, p, q) do
     lambda_set = Enum.map(subdecryptions, fn x -> elem(x, 0) end)
     Enum.map(subdecryptions, fn x ->
@@ -271,16 +268,19 @@ defmodule Herb do
     |> Enum.reduce(fn x, acc -> :maths.mod(x * acc, p) end)
   end
 
+  # Update view_subciphertext
   def get_new_view_subciphertext(view, round, pid, subciphertext) do
     res = Map.put(view[round], pid, subciphertext)
     Map.put(view, round, res)
   end
 
+  # Update view_subdecryption
   def get_new_view_subdecryption(view, round, pid, subdecryption) do
     res = Map.put(view[round], pid, subdecryption)
     Map.put(view, round, res)
   end
 
+  # Starting a new round of HERB
   def herb_new_round(state) do
     state = %{state | round_current: state.round_current + 1}
     cond do
@@ -310,8 +310,10 @@ defmodule Herb do
     end
   end
 
+  # Listen loop for HERB per round
   def herb(state) do
     receive do
+      # Listen option 1
       {sender, {a_k, b_k, nizk, round}} ->
         cond do
           # Ignore past round
@@ -332,13 +334,16 @@ defmodule Herb do
             state = %{state | view_subciphertext: new}
             count_subciphertext = Map.values(state.view_subciphertext[state.round_current]) |> Enum.count(fn x -> x != nil end)
             cond do
+              # Need to wait for more
               count_subciphertext < state.n ->
                 herb(state)
+              # Aggregate
               true ->
                 herb_send_decryption(state)
             end
         end
 
+      # Listen option 2
       {sender, {subdecryption, nizk_msg, round}} ->
         {nizk, g_to_share, a} = nizk_msg
         cond do
@@ -347,7 +352,7 @@ defmodule Herb do
             herb(state)
           # Check if NIZK returns true
           verify_dleq_nizk(state.g, g_to_share, a, subdecryption, state.p, state.q, nizk) == false ->
-            IO.puts "#{inspect(whoami())} Invalid NIZK"
+            # IO.puts "#{inspect(whoami())} Invalid NIZK"
             herb(state)
           # Message from a future round
           round > state.round_current ->
@@ -361,12 +366,13 @@ defmodule Herb do
             count_subdecryption = Map.values(state.view_subdecryption[state.round_current]) |> Enum.count(fn x -> x != nil end)
             count_subciphertext = Map.values(state.view_subciphertext[state.round_current]) |> Enum.count(fn x -> x != nil end)
             cond do
+              # Need to wait for more
               count_subdecryption < state.t ->
                 herb(state)
-              # Edge case: t number of subdecryption earlier than n number of subciphertext
-              # Concern: slowest subciphertext sender is still the bottleneck right now
+              # Edge case: t number of subdecryptions earlier than n number of subciphertexts
               count_subciphertext < state.n ->
                 herb(state)
+              # Aggregate
               true ->
                 herb_end_round(state)
             end
@@ -374,6 +380,7 @@ defmodule Herb do
     end
   end
 
+  # Need at least t out of n subdecryptions -> decryption -> retrieve message = group randomness
   def herb_send_decryption(state) do
     a = Map.to_list(state.view_subciphertext[state.round_current])
     |> Enum.map(fn x -> elem(elem(x, 1), 0) end)
@@ -385,16 +392,36 @@ defmodule Herb do
     msg = {subdecryption, nizk_msg, state.round_current}
 
     # Broadcasting
-    state.view
-    |> Enum.filter(fn pid -> pid != whoami() end)
-    |> Enum.map(fn pid -> send(pid, msg) end)
+    cond do
+      state.byzantine == true ->
+        nizk_byz = {:rand.uniform(state.p - 1), :rand.uniform(state.p - 1), :rand.uniform(state.q)}
+        nizk_msg_byz = {nizk_byz, :rand.uniform(state.p - 1), :rand.uniform(state.p - 1)}
+        msg_byz = {:rand.uniform(state.p - 1), nizk_msg_byz, state.round_current}
+        state.view
+        |> Enum.filter(fn pid -> pid != whoami() end)
+        |> Enum.map(fn pid -> send(pid, msg_byz) end)
+      state.byzantine == false ->
+        state.view
+        |> Enum.filter(fn pid -> pid != whoami() end)
+        |> Enum.map(fn pid -> send(pid, msg) end)
+    end
 
     # Update own state
     new = get_new_view_subdecryption(state.view_subdecryption, state.round_current, whoami(), subdecryption)
     state = %{state | view_subdecryption: new}
-    herb(state)
+    count_subdecryption = Map.values(state.view_subdecryption[state.round_current]) |> Enum.count(fn x -> x != nil end)
+    cond do
+      # Normal cases
+      count_subdecryption < state.t ->
+        herb(state)
+      # Edge case: already received t number of subdecryptions
+      true ->
+        # IO.puts "#{inspect(whoami())} Threshold hit already!"
+        herb_end_round(state)
+    end
   end
 
+  # Aggregate results from the current round of HERB and output current round's randomness beacon output
   def herb_end_round(state) do
     subdecryptions = Map.to_list(state.view_subdecryption[state.round_current])
     |> Enum.filter(fn x -> elem(x, 1) != nil end)
@@ -406,9 +433,7 @@ defmodule Herb do
     |> Enum.map(fn x -> elem(elem(x, 1), 1) end)
     |> Enum.reduce(fn x, acc -> :maths.mod(x * acc, state.p) end)
     round_output = :maths.mod(b * :maths.mod_inv(decryption, state.p), state.p)
-    round_output = :crypto.hash(:sha256, ["#{round_output}"]) |> :binary.decode_unsigned |> :maths.mod(state.p)
     # IO.puts "#{inspect(whoami())} Output for round #{inspect(state.round_current)} is #{inspect(round_output)}"
-
     cond do
       # Send the randomness beacon output to client (for dev purposes)
       state.replier == true ->
