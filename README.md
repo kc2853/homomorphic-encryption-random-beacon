@@ -11,3 +11,10 @@ There exist two issues with the current HERB paper:
 We propose HERB++ via Elixir implementation:
 1. Implemented is a new NIZK that resolves the prior restriction on a node's message space when chipping in its share of randomness into the protocol.
 2. While each round's decryption phase follows encryption phase, it is able to occur concurrently alongside it, handling network asynchrony better in case some nodes proceed to the decryption phase earlier than others. Asynchronous DKG was explored but not implemented.
+
+To replicate results, run:
+```
+mix deps.get
+cd apps/herb
+mix test
+```
